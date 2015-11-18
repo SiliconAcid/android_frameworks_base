@@ -27,6 +27,7 @@ import android.os.Binder;
 import android.os.Bundle;
 import android.os.IBinder;
 import android.os.ParcelFileDescriptor;
+import android.os.Process;
 import android.os.UserHandle;
 import android.text.TextUtils;
 
@@ -102,10 +103,12 @@ public class Content {
                 + "--where \"name=\'new_setting\'\"\n"
         + "\n"
         + "usage: adb shell content query --uri <URI> [--user <USER_ID>]"
-                + " [--projection <PROJECTION>] [--where <WHERE>] [--sort <SORT_ORDER>]\n"
+                + " [--projection <PROJECTION>] [--where <WHERE>] [--sort <SORT_ORDER>] "
+                + " [--show-type <SHOW-TYPE>] \n"
         + "  <PROJECTION> is a list of colon separated column names and is formatted:\n"
         + "  <COLUMN_NAME>[:<COLUMN_NAME>...]\n"
         + "  <SORT_ORDER> is the order in which rows in the result should be sorted.\n"
+        + "  <SHOW-TYPE> if true shows the type of value of each projection column"
         + "  Example:\n"
         + "  # Select \"name\" and \"value\" columns from secure settings where \"name\" is "
                 + "equal to \"new_setting\" and sort the result by name in ascending order.\n"
@@ -141,6 +144,7 @@ public class Content {
         private static final String ARGUMENT_METHOD = "--method";
         private static final String ARGUMENT_ARG = "--arg";
         private static final String ARGUMENT_EXTRA = "--extra";
+        private static final String ARGUMENT_SHOW_TYPE = "--show-type";
         private static final String TYPE_BOOLEAN = "b";
         private static final String TYPE_STRING = "s";
         private static final String TYPE_INTEGER = "i";
@@ -315,6 +319,7 @@ public class Content {
             String[] projection = null;
             String sort = null;
             String where = null;
+            boolean showType = false;
             for (String argument; (argument = mTokenizer.nextArg())!= null;) {
                 if (ARGUMENT_URI.equals(argument)) {
                     uri = Uri.parse(argumentValueRequired(argument));
@@ -326,6 +331,8 @@ public class Content {
                     sort = argumentValueRequired(argument);
                 } else if (ARGUMENT_PROJECTION.equals(argument)) {
                     projection = argumentValueRequired(argument).split("[\\s]*:[\\s]*");
+                } else if (ARGUMENT_SHOW_TYPE.equals(argument)) {
+                    showType = argumentValueRequiredForBoolean(argument);
                 } else {
                     throw new IllegalArgumentException("Unsupported argument: " + argument);
                 }
@@ -334,7 +341,7 @@ public class Content {
                 throw new IllegalArgumentException("Content provider URI not specified."
                         + " Did you specify --uri argument?");
             }
-            return new QueryCommand(uri, userId, projection, where, sort);
+            return new QueryCommand(uri, userId, projection, where, sort, showType);
         }
 
         private void parseBindValue(ContentValues values) {
@@ -364,6 +371,14 @@ public class Content {
             } else {
                 throw new IllegalArgumentException("Unsupported type: " + type);
             }
+        }
+
+        private boolean argumentValueRequiredForBoolean(String argument) {
+            String value = mTokenizer.nextArg();
+            if (TextUtils.isEmpty(value) || value.startsWith(ARGUMENT_PREFIX)) {
+                throw new IllegalArgumentException("No value for argument: " + argument);
+            }
+            return value.equals("true");
         }
 
         private String argumentValueRequired(String argument) {
@@ -426,6 +441,22 @@ public class Content {
             }
         }
 
+        public static String resolveCallingPackage() {
+            switch (Process.myUid()) {
+                case Process.ROOT_UID: {
+                    return "root";
+                }
+
+                case Process.SHELL_UID: {
+                    return "com.android.shell";
+                }
+
+                default: {
+                    return null;
+                }
+            }
+        }
+
         protected abstract void onExecute(IContentProvider provider) throws Exception;
     }
 
@@ -439,7 +470,7 @@ public class Content {
 
         @Override
         public void onExecute(IContentProvider provider) throws Exception {
-            provider.insert(null, mUri, mContentValues);
+            provider.insert(resolveCallingPackage(), mUri, mContentValues);
         }
     }
 
@@ -453,7 +484,7 @@ public class Content {
 
         @Override
         public void onExecute(IContentProvider provider) throws Exception {
-            provider.delete(null, mUri, mWhere, null);
+            provider.delete(resolveCallingPackage(), mUri, mWhere, null);
         }
     }
 
@@ -501,7 +532,7 @@ public class Content {
 
         @Override
         public void onExecute(IContentProvider provider) throws Exception {
-            final ParcelFileDescriptor fd = provider.openFile(null, mUri, "r", null);
+            final ParcelFileDescriptor fd = provider.openFile(null, mUri, "r", null, null);
             copy(new FileInputStream(fd.getFileDescriptor()), System.out);
         }
 
@@ -522,17 +553,21 @@ public class Content {
     private static class QueryCommand extends DeleteCommand {
         final String[] mProjection;
         final String mSortOrder;
+        final boolean mShowType;
 
         public QueryCommand(
-                Uri uri, int userId, String[] projection, String where, String sortOrder) {
+                Uri uri, int userId, String[] projection, String where, String sortOrder,
+                boolean showType) {
             super(uri, userId, where);
             mProjection = projection;
             mSortOrder = sortOrder;
+            mShowType = showType;
         }
 
         @Override
         public void onExecute(IContentProvider provider) throws Exception {
-            Cursor cursor = provider.query(null, mUri, mProjection, mWhere, null, mSortOrder, null);
+            Cursor cursor = provider.query(resolveCallingPackage(), mUri, mProjection, mWhere,
+                    null, mSortOrder, null);
             if (cursor == null) {
                 System.out.println("No result found.");
                 return;
@@ -572,6 +607,7 @@ public class Content {
                                     break;
                             }
                             builder.append(columnName).append("=").append(columnValue);
+                            if (mShowType) builder.append(", type=").append(type);
                         }
                         System.out.println(builder);
                     } while (cursor.moveToNext());
@@ -594,7 +630,7 @@ public class Content {
 
         @Override
         public void onExecute(IContentProvider provider) throws Exception {
-            provider.update(null, mUri, mContentValues, mWhere, null);
+            provider.update(resolveCallingPackage(), mUri, mContentValues, mWhere, null);
         }
     }
 

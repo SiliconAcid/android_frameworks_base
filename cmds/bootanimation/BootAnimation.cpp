@@ -24,6 +24,7 @@
 #include <fcntl.h>
 #include <utils/misc.h>
 #include <signal.h>
+#include <time.h>
 #include <pthread.h>
 #include <sys/select.h>
 
@@ -44,9 +45,13 @@
 #include <gui/Surface.h>
 #include <gui/SurfaceComposerClient.h>
 
+// TODO: Fix Skia.
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wunused-parameter"
 #include <SkBitmap.h>
 #include <SkStream.h>
 #include <SkImageDecoder.h>
+#pragma GCC diagnostic pop
 
 #include <GLES/gl.h>
 #include <GLES/glext.h>
@@ -67,7 +72,6 @@
 #define OEM_SHUTDOWN_ANIMATION_FILE "/oem/media/shutdownanimation.zip"
 #define SYSTEM_SHUTDOWN_ANIMATION_FILE "/system/media/shutdownanimation.zip"
 #define SYSTEM_ENCRYPTED_SHUTDOWN_ANIMATION_FILE "/system/media/shutdownanimation-encrypted.zip"
-#define THEME_SHUTDOWN_ANIMATION_FILE "/data/system/theme/shutdownanimation.zip"
 
 #define OEM_BOOT_MUSIC_FILE "/oem/media/boot.wav"
 #define SYSTEM_BOOT_MUSIC_FILE "/system/media/boot.wav"
@@ -76,10 +80,6 @@
 #define SYSTEM_SHUTDOWN_MUSIC_FILE "/system/media/shutdown.wav"
 
 #define EXIT_PROP_NAME "service.bootanim.exit"
-
-extern "C" int clock_nanosleep(clockid_t clock_id, int flags,
-                           const struct timespec *request,
-                           struct timespec *remain);
 
 namespace android {
 
@@ -94,7 +94,7 @@ static bool isMPlayerCompleted = false;
 
 class MPlayerListener : public MediaPlayerListener
 {
-    void notify(int msg, int ext1, int ext2, const Parcel *obj)
+    void notify(int msg, int /*ext1*/, int /*ext2*/, const Parcel * /*obj*/)
     {
         switch (msg) {
         case MEDIA_NOP: // interface test message
@@ -117,12 +117,12 @@ class MPlayerListener : public MediaPlayerListener
     }
 };
 
-static long getFreeMemory(void)
+static unsigned long getFreeMemory(void)
 {
     int fd = open("/proc/meminfo", O_RDONLY);
     const char* const sums[] = { "MemFree:", "Cached:", NULL };
-    const int sumsLen[] = { strlen("MemFree:"), strlen("Cached:"), 0 };
-    int num = 2;
+    const size_t sumsLen[] = { strlen("MemFree:"), strlen("Cached:"), 0 };
+    unsigned int num = 2;
 
     if (fd < 0) {
         ALOGW("Unable to open /proc/meminfo");
@@ -140,7 +140,7 @@ static long getFreeMemory(void)
     buffer[len] = 0;
 
     size_t numFound = 0;
-    long mem = 0;
+    unsigned long mem = 0;
 
     char* p = buffer;
     while (*p && numFound < num) {
@@ -209,7 +209,7 @@ void BootAnimation::binderDied(const wp<IBinder>&)
 status_t BootAnimation::initTexture(Texture* texture, AssetManager& assets,
         const char* name) {
     Asset* asset = assets.open(name, Asset::ACCESS_BUFFER);
-    if (!asset)
+    if (asset == NULL)
         return NO_INIT;
     SkBitmap bitmap;
     SkImageDecoder::DecodeMemory(asset->getBuffer(false), asset->getLength(),
@@ -261,14 +261,14 @@ status_t BootAnimation::initTexture(Texture* texture, AssetManager& assets,
     return NO_ERROR;
 }
 
-status_t BootAnimation::initTexture(void* buffer, size_t len)
+status_t BootAnimation::initTexture(const Animation::Frame& frame)
 {
     //StopWatch watch("blah");
 
     SkBitmap bitmap;
-    SkMemoryStream  stream(buffer, len);
+    SkMemoryStream  stream(frame.map->getDataPtr(), frame.map->getDataLength());
     SkImageDecoder* codec = SkImageDecoder::Factory(&stream);
-    if (codec) {
+    if (codec != NULL) {
         codec->setDitherImage(false);
         codec->decode(&stream, &bitmap,
                 #ifdef USE_565
@@ -336,6 +336,18 @@ status_t BootAnimation::readyToRun() {
     status_t status = SurfaceComposerClient::getDisplayInfo(dtoken, &dinfo);
     if (status)
         return -1;
+    char value[PROPERTY_VALUE_MAX];
+    property_get("persist.panel.orientation", value, "0");
+    int orient = atoi(value) / 90;
+
+    if(orient == eOrientation90 || orient == eOrientation270) {
+        int temp = dinfo.h;
+        dinfo.h = dinfo.w;
+        dinfo.w = temp;
+    }
+
+    Rect destRect(dinfo.w, dinfo.h);
+    mSession->setDisplayProjection(dtoken, orient, destRect, destRect);
 
     // create the native surface
     sp<SurfaceControl> control = session()->createSurface(String8("BootAnimation"),
@@ -355,7 +367,7 @@ status_t BootAnimation::readyToRun() {
             EGL_DEPTH_SIZE, 0,
             EGL_NONE
     };
-    EGLint w, h, dummy;
+    EGLint w, h;
     EGLint numConfigs;
     EGLConfig config;
     EGLSurface surface;
@@ -395,11 +407,17 @@ status_t BootAnimation::readyToRun() {
             (access(getAnimationFileName(IMG_ENC), R_OK) == 0) &&
             ((zipFile = ZipFileRO::open(getAnimationFileName(IMG_ENC))) != NULL)) ||
 
+            ((access(THEME_BOOTANIMATION_FILE, R_OK) == 0) &&
+            ((zipFile = ZipFileRO::open(THEME_BOOTANIMATION_FILE)) != NULL)) ||
+
+            ((access(OEM_BOOTANIMATION_FILE, R_OK) == 0) &&
+            ((zipFile = ZipFileRO::open(OEM_BOOTANIMATION_FILE)) != NULL)) ||
+
+            ((access(SYSTEM_BOOTANIMATION_FILE, R_OK) == 0) &&
+            ((zipFile = ZipFileRO::open(SYSTEM_BOOTANIMATION_FILE)) != NULL)) ||
+
             ((access(getAnimationFileName(IMG_DATA), R_OK) == 0) &&
             ((zipFile = ZipFileRO::open(getAnimationFileName(IMG_DATA))) != NULL)) ||
-
-            ((access(getAnimationFileName(IMG_THEME), R_OK) == 0) &&
-            ((zipFile = ZipFileRO::open(getAnimationFileName(IMG_THEME))) != NULL)) ||
 
             ((access(getAnimationFileName(IMG_SYS), R_OK) == 0) &&
             ((zipFile = ZipFileRO::open(getAnimationFileName(IMG_SYS))) != NULL))) {
@@ -581,7 +599,7 @@ bool BootAnimation::readFile(const char* name, String8& outString)
     }
 
     outString.setTo((char const*)entryMap->getDataPtr(), entryMap->getDataLength());
-    entryMap->release();
+    delete entryMap;
     return true;
 }
 
@@ -610,7 +628,7 @@ bool BootAnimation::movie()
     // Parse the description file
     for (;;) {
         const char* endl = strstr(s, "\n");
-        if (!endl) break;
+        if (endl == NULL) break;
         String8 line(s, endl - s);
         const char* l = line.string();
         int fps, width, height, count, pause;
@@ -666,7 +684,7 @@ bool BootAnimation::movie()
         if (leaf.size() > 0) {
             for (size_t j=0 ; j<pcount ; j++) {
                 if (path == animation.parts[j].path) {
-                    int method;
+                    uint16_t method;
                     // supports only stored png files
                     if (mZip->getEntryInfo(entry, &method, NULL, NULL, NULL, NULL, NULL)) {
                         if (method == ZipFileRO::kCompressStored) {
@@ -693,15 +711,11 @@ bool BootAnimation::movie()
     mZip->endIteration(cookie);
 
 #ifndef CONTINUOUS_SPLASH
-    // clear screen
     glShadeModel(GL_FLAT);
     glDisable(GL_DITHER);
     glDisable(GL_SCISSOR_TEST);
     glDisable(GL_BLEND);
-    glClearColor(0,0,0,1);
-    glClear(GL_COLOR_BUFFER_BIT);
 
-    eglSwapBuffers(mDisplay, mSurface);
 #endif
 
     glBindTexture(GL_TEXTURE_2D, 0);
@@ -714,7 +728,6 @@ bool BootAnimation::movie()
 
     const int xc = (mWidth - animation.width) / 2;
     const int yc = ((mHeight - animation.height) / 2);
-    nsecs_t lastFrame = systemTime();
     nsecs_t frameDuration = s2ns(1) / animation.fps;
 
     Region clearReg(Rect(mWidth, mHeight));
@@ -789,9 +802,7 @@ bool BootAnimation::movie()
                         glTexParameterx(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
                         glTexParameterx(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
                     }
-                    initTexture(
-                            frame.map->getDataPtr(),
-                            frame.map->getDataLength());
+                    initTexture(frame);
                 }
 
                 if (!clearReg.isEmpty()) {
@@ -799,14 +810,17 @@ bool BootAnimation::movie()
                     Region::const_iterator tail(clearReg.end());
                     glEnable(GL_SCISSOR_TEST);
                     while (head != tail) {
-                        const Rect& r(*head++);
-                        glScissor(r.left, mHeight - r.bottom,
-                                r.width(), r.height());
+                        const Rect& r2(*head++);
+                        glScissor(r2.left, mHeight - r2.bottom,
+                                r2.width(), r2.height());
                         glClear(GL_COLOR_BUFFER_BIT);
                     }
                     glDisable(GL_SCISSOR_TEST);
                 }
-                glDrawTexiOES(xc, yc, 0, animation.width, animation.height);
+                // specify the y center as ceiling((mHeight - animation.height) / 2)
+                // which is equivalent to mHeight - (yc + animation.height)
+                glDrawTexiOES(xc, mHeight - (yc + animation.height),
+                              0, animation.width, animation.height);
                 eglSwapBuffers(mDisplay, mSurface);
 
                 nsecs_t now = systemTime();
@@ -871,30 +885,39 @@ bool BootAnimation::movie()
     return false;
 }
 
-char *BootAnimation::getAnimationFileName(ImageID image)
+const char *BootAnimation::getAnimationFileName(ImageID image)
 {
-    char *fileName[2][4] = { { OEM_BOOTANIMATION_FILE,
+    const char *fileName[2][3] = { { OEM_BOOTANIMATION_FILE,
             SYSTEM_BOOTANIMATION_FILE,
-            SYSTEM_ENCRYPTED_BOOTANIMATION_FILE,
-            THEME_BOOTANIMATION_FILE }, {
+            SYSTEM_ENCRYPTED_BOOTANIMATION_FILE }, {
             OEM_SHUTDOWN_ANIMATION_FILE,
             SYSTEM_SHUTDOWN_ANIMATION_FILE,
-            SYSTEM_ENCRYPTED_SHUTDOWN_ANIMATION_FILE,
-            THEME_SHUTDOWN_ANIMATION_FILE } };
+            SYSTEM_ENCRYPTED_SHUTDOWN_ANIMATION_FILE} };
     int state;
+    char sku[PROPERTY_VALUE_MAX];
+    char skusuffix[PATH_MAX];
 
     state = checkBootState() ? 0 : 1;
+
+    property_get("ro.prebundled.mcc", sku, "000");
+    sprintf(skusuffix,"-%s",sku);
+
+    String16 skuPath(fileName[state][image]);
+    skuPath.insert(skuPath.size()-4,String16(skusuffix));
+
+    if (access(String8(skuPath).string(), R_OK) == 0)
+        return (char *)String8(skuPath).string();
 
     return fileName[state][image];
 }
 
-char *BootAnimation::getBootRingtoneFileName(ImageID image)
+const char *BootAnimation::getBootRingtoneFileName(ImageID image)
 {
     if (image == IMG_ENC) {
         return NULL;
     }
 
-    char *fileName[2][2] = { { OEM_BOOT_MUSIC_FILE,
+    const char *fileName[2][2] = { { OEM_BOOT_MUSIC_FILE,
             SYSTEM_BOOT_MUSIC_FILE }, {
             OEM_SHUTDOWN_MUSIC_FILE,
             SYSTEM_SHUTDOWN_MUSIC_FILE } };
@@ -905,51 +928,7 @@ char *BootAnimation::getBootRingtoneFileName(ImageID image)
     return fileName[state][image];
 }
 
-
-void BootAnimation::playBackgroundMusic(void)
-{
-    //Shutdown music is playing in ShutdownThread.java
-    if (!checkBootState()) {
-        return;
-    }
-
-    /* Make sure sound cards are populated */
-    FILE* fp = NULL;
-    if ((fp = fopen("/proc/asound/cards", "r")) == NULL) {
-        ALOGW("Cannot open /proc/asound/cards file to get sound card info.");
-    }
-
-    char value[PROPERTY_VALUE_MAX];
-    property_get("qcom.audio.init", value, "null");
-    if (strncmp(value, "complete", 8) != 0) {
-        ALOGW("Audio service is not initiated.");
-    }
-
-    fclose(fp);
-
-    char *fileName;
-    if (((fileName = getBootRingtoneFileName(IMG_DATA)) != NULL && access(fileName, R_OK) == 0) ||
-                ((fileName = getBootRingtoneFileName(IMG_SYS)) != NULL
-                && access(fileName, R_OK) == 0)) {
-        pthread_t tid;
-        pthread_create(&tid, NULL, playMusic, (void *)fileName);
-        pthread_join(tid, NULL);
-    }
-}
-bool BootAnimation::checkBootState(void)
-{
-    char value[PROPERTY_VALUE_MAX];
-    bool ret = true;
-
-    property_get("sys.shutdown.requested", value, "null");
-    if (strncmp(value, "null", 4) != 0) {
-        ret = false;
-    }
-
-    return ret;
-}
-
-void* playMusic(void* arg)
+static void* playMusic(void* arg)
 {
     int index = 0;
     char *fileName = (char *)arg;
@@ -989,7 +968,50 @@ void* playMusic(void* arg)
     }
     return NULL;
 }
+
+void BootAnimation::playBackgroundMusic(void)
+{
+    //Shutdown music is playing in ShutdownThread.java
+    if (!checkBootState()) {
+        return;
+    }
+
+    /* Make sure sound cards are populated */
+    FILE* fp = NULL;
+    if ((fp = fopen("/proc/asound/cards", "r")) == NULL) {
+        ALOGW("Cannot open /proc/asound/cards file to get sound card info.");
+    }
+
+    char value[PROPERTY_VALUE_MAX];
+    property_get("qcom.audio.init", value, "null");
+    if (strncmp(value, "complete", 8) != 0) {
+        ALOGW("Audio service is not initiated.");
+    }
+
+    fclose(fp);
+
+    const char *fileName;
+    if (((fileName = getBootRingtoneFileName(IMG_DATA)) != NULL && access(fileName, R_OK) == 0) ||
+                ((fileName = getBootRingtoneFileName(IMG_SYS)) != NULL
+                && access(fileName, R_OK) == 0)) {
+        pthread_t tid;
+        pthread_create(&tid, NULL, playMusic, (void *)fileName);
+        pthread_join(tid, NULL);
+    }
+}
+bool BootAnimation::checkBootState(void)
+{
+    char value[PROPERTY_VALUE_MAX];
+    bool ret = true;
+
+    property_get("sys.shutdown.requested", value, "null");
+    if (strncmp(value, "null", 4) != 0) {
+        ret = false;
+    }
+
+    return ret;
+}
+
 // ---------------------------------------------------------------------------
 
-}
-; // namespace android
+}; // namespace android

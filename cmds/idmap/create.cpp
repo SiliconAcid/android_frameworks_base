@@ -7,6 +7,7 @@
 #include <utils/String8.h>
 
 #include <fcntl.h>
+#include <sys/file.h>
 #include <sys/stat.h>
 
 using namespace android;
@@ -14,11 +15,6 @@ using namespace android;
 namespace {
     int get_zip_entry_crc(const char *zip_path, const char *entry_name, uint32_t *crc)
     {
-        if (crc == NULL) {
-            // As this function used to get the crc, but the address is NULL, do nothing.
-            return -1;
-        }
-
         UniquePtr<ZipFileRO> zip(ZipFileRO::open(zip_path));
         if (zip.get() == NULL) {
             return -1;
@@ -27,12 +23,9 @@ namespace {
         if (entry == NULL) {
             return -1;
         }
-        long tmp;
-        if (!zip->getEntryInfo(entry, NULL, NULL, NULL, NULL, NULL, &tmp)) {
+        if (!zip->getEntryInfo(entry, NULL, NULL, NULL, NULL, NULL, crc)) {
             return -1;
         }
-        // As the crc of the apk only contains 32bits, so the convert action is safe.
-        *crc = (uint32_t) tmp;
         zip->releaseEntry(entry);
         return 0;
     }
@@ -40,6 +33,7 @@ namespace {
     int open_idmap(const char *path)
     {
         int fd = TEMP_FAILURE_RETRY(open(path, O_WRONLY | O_CREAT | O_TRUNC, 0644));
+        bool needUnlink = true;
         if (fd == -1) {
             ALOGD("error: open %s: %s\n", path, strerror(errno));
             goto fail;
@@ -48,8 +42,10 @@ namespace {
             ALOGD("error: fchmod %s: %s\n", path, strerror(errno));
             goto fail;
         }
-        if (TEMP_FAILURE_RETRY(flock(fd, LOCK_EX | LOCK_NB)) != 0) {
+        if (TEMP_FAILURE_RETRY(flock(fd, LOCK_EX)) != 0) {
             ALOGD("error: flock %s: %s\n", path, strerror(errno));
+            // If the file is locked by another process, then we needn't unlink the file.
+            needUnlink = false;
             goto fail;
         }
 
@@ -57,7 +53,7 @@ namespace {
 fail:
         if (fd != -1) {
             close(fd);
-            unlink(path);
+            if (needUnlink) unlink(path);
         }
         return -1;
     }
@@ -74,7 +70,7 @@ fail:
                 fprintf(stderr, "error: write: %s\n", strerror(errno));
                 return -1;
             }
-            bytesLeft -= w;
+            bytesLeft -= static_cast<size_t>(w);
         }
         return 0;
     }
@@ -86,13 +82,13 @@ fail:
         if (fstat(idmap_fd, &st) == -1) {
             return true;
         }
-        if (st.st_size < N) {
+        if (st.st_size < static_cast<off_t>(N)) {
             // file is empty or corrupt
             return true;
         }
 
         char buf[N];
-        ssize_t bytesLeft = N;
+        size_t bytesLeft = N;
         if (lseek(idmap_fd, SEEK_SET, 0) < 0) {
             return true;
         }
@@ -101,7 +97,7 @@ fail:
             if (r < 0) {
                 return true;
             }
-            bytesLeft -= r;
+            bytesLeft -= static_cast<size_t>(r);
             if (bytesLeft == 0) {
                 break;
             }

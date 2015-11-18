@@ -40,6 +40,12 @@ class SurfaceControl;
 class BootAnimation : public Thread, public IBinder::DeathRecipient
 {
 public:
+    enum {
+        eOrientationDefault     = 0,
+        eOrientation90          = 1,
+        eOrientation180         = 2,
+        eOrientation270         = 3,
+    };
                 BootAnimation();
     virtual     ~BootAnimation();
 
@@ -82,14 +88,14 @@ private:
     };
 
     status_t initTexture(Texture* texture, AssetManager& asset, const char* name);
-    status_t initTexture(void* buffer, size_t len);
+    status_t initTexture(const Animation::Frame& frame);
     bool android();
     bool readFile(const char* name, String8& outString);
     bool movie();
 
-    enum ImageID { IMG_DATA = 0, IMG_SYS = 1, IMG_ENC = 2, IMG_THEME = 3 };
-    char *getAnimationFileName(ImageID image);
-    char *getBootRingtoneFileName(ImageID image);
+    enum ImageID { IMG_DATA = 0, IMG_SYS = 1, IMG_ENC = 2 };
+    const char *getAnimationFileName(ImageID image);
+    const char *getBootRingtoneFileName(ImageID image);
     void playBackgroundMusic();
     bool checkBootState();
     void checkExit();
@@ -109,7 +115,6 @@ private:
     ZipFileRO   *mZip;
 };
 
-static void* playMusic(void* arg);
 // ---------------------------------------------------------------------------
 
 }; // namespace android
