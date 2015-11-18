@@ -20,22 +20,33 @@ import android.app.ActivityManagerNative;
 import android.app.IActivityManager;
 import android.app.IActivityManager.ContentProviderHolder;
 import android.content.IContentProvider;
+import android.database.Cursor;
 import android.net.Uri;
 import android.os.Binder;
 import android.os.Bundle;
 import android.os.IBinder;
+import android.os.Process;
 import android.os.RemoteException;
 import android.os.UserHandle;
 import android.provider.Settings;
+import android.text.TextUtils;
+import cyanogenmod.providers.CMSettings;
+
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
 
 public final class SettingsCmd {
-    static final String TAG = "settings";
+
+    private static final String SETTINGS_AUTHORITY = Settings.AUTHORITY;
+    private static final String CMSETTINGS_AUTHORITY = CMSettings.AUTHORITY;
 
     enum CommandVerb {
         UNSPECIFIED,
         GET,
         PUT,
-        DELETE
+        DELETE,
+        LIST,
     }
 
     static String[] mArgs;
@@ -45,9 +56,10 @@ public final class SettingsCmd {
     String mTable = null;
     String mKey = null;
     String mValue = null;
+    boolean mUseCMSettingsProvider = false;
 
     public static void main(String[] args) {
-        if (args == null || args.length < 3) {
+        if (args == null || args.length < 2) {
             printUsage();
             return;
         }
@@ -71,6 +83,8 @@ public final class SettingsCmd {
                         break;
                     }
                     mUser = Integer.parseInt(nextArg());
+                } else if ("--cm".equals(arg)) {
+                    mUseCMSettingsProvider = true;
                 } else if (mVerb == CommandVerb.UNSPECIFIED) {
                     if ("get".equalsIgnoreCase(arg)) {
                         mVerb = CommandVerb.GET;
@@ -78,6 +92,8 @@ public final class SettingsCmd {
                         mVerb = CommandVerb.PUT;
                     } else if ("delete".equalsIgnoreCase(arg)) {
                         mVerb = CommandVerb.DELETE;
+                    } else if ("list".equalsIgnoreCase(arg)) {
+                        mVerb = CommandVerb.LIST;
                     } else {
                         // invalid
                         System.err.println("Invalid command: " + arg);
@@ -91,6 +107,10 @@ public final class SettingsCmd {
                         break;  // invalid
                     }
                     mTable = arg.toLowerCase();
+                    if (mVerb == CommandVerb.LIST) {
+                        valid = true;
+                        break;
+                    }
                 } else if (mVerb == CommandVerb.GET || mVerb == CommandVerb.DELETE) {
                     mKey = arg;
                     if (mNextArg >= mArgs.length) {
@@ -121,13 +141,21 @@ public final class SettingsCmd {
                 mUser = UserHandle.USER_OWNER;
             }
 
+            // Implicitly use CMSettings provider if the setting is a legacy setting
+            if (!mUseCMSettingsProvider && isLegacySetting(mTable, mKey)) {
+                System.err.println("'" + mKey + "' has moved to CMSettings.  Use --cm to avoid " +
+                        "this warning in the future.");
+                mUseCMSettingsProvider = true;
+            }
+
             try {
                 IActivityManager activityManager = ActivityManagerNative.getDefault();
                 IContentProvider provider = null;
                 IBinder token = new Binder();
                 try {
                     ContentProviderHolder holder = activityManager.getContentProviderExternal(
-                            "settings", UserHandle.USER_OWNER, token);
+                            mUseCMSettingsProvider ? CMSETTINGS_AUTHORITY : SETTINGS_AUTHORITY,
+                            UserHandle.USER_OWNER, token);
                     if (holder == null) {
                         throw new IllegalStateException("Could not find settings provider");
                     }
@@ -143,6 +171,11 @@ public final class SettingsCmd {
                         case DELETE:
                             System.out.println("Deleted "
                                     + deleteForUser(provider, mUser, mTable, mKey) + " rows");
+                            break;
+                        case LIST:
+                            for (String line : listForUser(provider, mUser, mTable)) {
+                                System.out.println(line);
+                            }
                             break;
                         default:
                             System.err.println("Unspecified command");
@@ -164,6 +197,40 @@ public final class SettingsCmd {
         }
     }
 
+    private List<String> listForUser(IContentProvider provider, int userHandle, String table) {
+        final Uri systemUri = mUseCMSettingsProvider ? CMSettings.System.CONTENT_URI
+                : Settings.System.CONTENT_URI;
+        final Uri secureUri = mUseCMSettingsProvider ? CMSettings.Secure.CONTENT_URI
+                : Settings.Secure.CONTENT_URI;
+        final Uri globalUri = mUseCMSettingsProvider ? CMSettings.Global.CONTENT_URI
+                : Settings.Global.CONTENT_URI;
+        final Uri uri = "system".equals(table) ? systemUri
+                : "secure".equals(table) ? secureUri
+                : "global".equals(table) ? globalUri
+                : null;
+        final ArrayList<String> lines = new ArrayList<String>();
+        if (uri == null) {
+            return lines;
+        }
+        try {
+            final Cursor cursor = provider.query(resolveCallingPackage(), uri, null, null, null,
+                    null, null);
+            try {
+                while (cursor != null && cursor.moveToNext()) {
+                    lines.add(cursor.getString(1) + "=" + cursor.getString(2));
+                }
+            } finally {
+                if (cursor != null) {
+                    cursor.close();
+                }
+            }
+            Collections.sort(lines);
+        } catch (RemoteException e) {
+            System.err.println("List failed in " + table + " for user " + userHandle);
+        }
+        return lines;
+    }
+
     private String nextArg() {
         if (mNextArg >= mArgs.length) {
             return null;
@@ -175,10 +242,16 @@ public final class SettingsCmd {
 
     String getForUser(IContentProvider provider, int userHandle,
             final String table, final String key) {
+        final String systemGetCommand = mUseCMSettingsProvider ? CMSettings.CALL_METHOD_GET_SYSTEM
+                : Settings.CALL_METHOD_GET_SYSTEM;
+        final String secureGetCommand = mUseCMSettingsProvider ? CMSettings.CALL_METHOD_GET_SECURE
+                : Settings.CALL_METHOD_GET_SECURE;
+        final String globalGetCommand = mUseCMSettingsProvider ? CMSettings.CALL_METHOD_GET_GLOBAL
+                : Settings.CALL_METHOD_GET_GLOBAL;
         final String callGetCommand;
-        if ("system".equals(table)) callGetCommand = Settings.CALL_METHOD_GET_SYSTEM;
-        else if ("secure".equals(table)) callGetCommand = Settings.CALL_METHOD_GET_SECURE;
-        else if ("global".equals(table)) callGetCommand = Settings.CALL_METHOD_GET_GLOBAL;
+        if ("system".equals(table)) callGetCommand = systemGetCommand;
+        else if ("secure".equals(table)) callGetCommand = secureGetCommand;
+        else if ("global".equals(table)) callGetCommand = globalGetCommand;
         else {
             System.err.println("Invalid table; no put performed");
             throw new IllegalArgumentException("Invalid table " + table);
@@ -187,8 +260,9 @@ public final class SettingsCmd {
         String result = null;
         try {
             Bundle arg = new Bundle();
-            arg.putInt(Settings.CALL_METHOD_USER_KEY, userHandle);
-            Bundle b = provider.call(null, callGetCommand, key, arg);
+            arg.putInt(mUseCMSettingsProvider ? CMSettings.CALL_METHOD_USER_KEY
+                    : Settings.CALL_METHOD_USER_KEY, userHandle);
+            Bundle b = provider.call(resolveCallingPackage(), callGetCommand, key, arg);
             if (b != null) {
                 result = b.getPairValue();
             }
@@ -200,10 +274,16 @@ public final class SettingsCmd {
 
     void putForUser(IContentProvider provider, int userHandle,
             final String table, final String key, final String value) {
+        final String systemPutCommand = mUseCMSettingsProvider ? CMSettings.CALL_METHOD_PUT_SYSTEM
+                : Settings.CALL_METHOD_PUT_SYSTEM;
+        final String securePutCommand = mUseCMSettingsProvider ? CMSettings.CALL_METHOD_PUT_SECURE
+                : Settings.CALL_METHOD_PUT_SECURE;
+        final String globalPutCommand = mUseCMSettingsProvider ? CMSettings.CALL_METHOD_PUT_GLOBAL
+                : Settings.CALL_METHOD_PUT_GLOBAL;
         final String callPutCommand;
-        if ("system".equals(table)) callPutCommand = Settings.CALL_METHOD_PUT_SYSTEM;
-        else if ("secure".equals(table)) callPutCommand = Settings.CALL_METHOD_PUT_SECURE;
-        else if ("global".equals(table)) callPutCommand = Settings.CALL_METHOD_PUT_GLOBAL;
+        if ("system".equals(table)) callPutCommand = systemPutCommand;
+        else if ("secure".equals(table)) callPutCommand = securePutCommand;
+        else if ("global".equals(table)) callPutCommand = globalPutCommand;
         else {
             System.err.println("Invalid table; no put performed");
             return;
@@ -212,8 +292,9 @@ public final class SettingsCmd {
         try {
             Bundle arg = new Bundle();
             arg.putString(Settings.NameValueTable.VALUE, value);
-            arg.putInt(Settings.CALL_METHOD_USER_KEY, userHandle);
-            provider.call(null, callPutCommand, key, arg);
+            arg.putInt(mUseCMSettingsProvider ? CMSettings.CALL_METHOD_USER_KEY
+                    : Settings.CALL_METHOD_USER_KEY, userHandle);
+            provider.call(resolveCallingPackage(), callPutCommand, key, arg);
         } catch (RemoteException e) {
             System.err.println("Can't set key " + key + " in " + table + " for user " + userHandle);
         }
@@ -221,10 +302,16 @@ public final class SettingsCmd {
 
     int deleteForUser(IContentProvider provider, int userHandle,
             final String table, final String key) {
+        final Uri systemUri = mUseCMSettingsProvider ? CMSettings.System.getUriFor(key)
+                : Settings.System.getUriFor(key);
+        final Uri secureUri = mUseCMSettingsProvider ? CMSettings.Secure.getUriFor(key)
+                : Settings.Secure.getUriFor(key);
+        final Uri globalUri = mUseCMSettingsProvider ? CMSettings.Global.getUriFor(key)
+                : Settings.Global.getUriFor(key);
         Uri targetUri;
-        if ("system".equals(table)) targetUri = Settings.System.getUriFor(key);
-        else if ("secure".equals(table)) targetUri = Settings.Secure.getUriFor(key);
-        else if ("global".equals(table)) targetUri = Settings.Global.getUriFor(key);
+        if ("system".equals(table)) targetUri = systemUri;
+        else if ("secure".equals(table)) targetUri = secureUri;
+        else if ("global".equals(table)) targetUri = globalUri;
         else {
             System.err.println("Invalid table; no delete performed");
             throw new IllegalArgumentException("Invalid table " + table);
@@ -232,7 +319,7 @@ public final class SettingsCmd {
 
         int num = 0;
         try {
-            num = provider.delete(null, targetUri, null, null);
+            num = provider.delete(resolveCallingPackage(), targetUri, null, null);
         } catch (RemoteException e) {
             System.err.println("Can't clear key " + key + " in " + table + " for user "
                     + userHandle);
@@ -241,10 +328,41 @@ public final class SettingsCmd {
     }
 
     private static void printUsage() {
-        System.err.println("usage:  settings [--user NUM] get namespace key");
-        System.err.println("        settings [--user NUM] put namespace key value");
-        System.err.println("        settings [--user NUM] delete namespace key");
+        System.err.println("usage:  settings [--user NUM] [--cm] get namespace key");
+        System.err.println("        settings [--user NUM] [--cm] put namespace key value");
+        System.err.println("        settings [--user NUM] [--cm] delete namespace key");
+        System.err.println("        settings [--user NUM] [--cm] list namespace");
         System.err.println("\n'namespace' is one of {system, secure, global}, case-insensitive");
         System.err.println("If '--user NUM' is not given, the operations are performed on the owner user.");
+        System.err.println("If '--cm' is given, the operations are performed on the CMSettings provider.");
+    }
+
+    private static boolean isLegacySetting(String table, String key) {
+        if (!TextUtils.isEmpty(key)) {
+            if ("system".equals(table)) {
+                return CMSettings.System.isLegacySetting(key);
+            } else if ("secure".equals(table)) {
+                return CMSettings.Secure.isLegacySetting(key);
+            } else if ("global".equals(table)) {
+                return CMSettings.Global.isLegacySetting(key);
+            }
+        }
+        return false;
+    }
+
+    public static String resolveCallingPackage() {
+        switch (android.os.Process.myUid()) {
+            case Process.ROOT_UID: {
+                return "root";
+            }
+
+            case Process.SHELL_UID: {
+                return "com.android.shell";
+            }
+
+            default: {
+                return null;
+            }
+        }
     }
 }
